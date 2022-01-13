@@ -2679,6 +2679,12 @@ BoxParser.createSampleEntryCtor(BoxParser.SAMPLE_ENTRY_TYPE_VISUAL, "avc4");
 BoxParser.createSampleEntryCtor(BoxParser.SAMPLE_ENTRY_TYPE_VISUAL, "av01");
 BoxParser.createSampleEntryCtor(BoxParser.SAMPLE_ENTRY_TYPE_VISUAL, "hvc1");
 BoxParser.createSampleEntryCtor(BoxParser.SAMPLE_ENTRY_TYPE_VISUAL, "hev1");
+BoxParser.createSampleEntryCtor(BoxParser.SAMPLE_ENTRY_TYPE_VISUAL, "vvc1");
+BoxParser.createSampleEntryCtor(BoxParser.SAMPLE_ENTRY_TYPE_VISUAL, "vvi1");
+BoxParser.createSampleEntryCtor(BoxParser.SAMPLE_ENTRY_TYPE_VISUAL, "vvs1");
+BoxParser.createSampleEntryCtor(BoxParser.SAMPLE_ENTRY_TYPE_VISUAL, "vvcN");
+BoxParser.createSampleEntryCtor(BoxParser.SAMPLE_ENTRY_TYPE_VISUAL, "vp08");
+BoxParser.createSampleEntryCtor(BoxParser.SAMPLE_ENTRY_TYPE_VISUAL, "vp09");
 BoxParser.createSampleEntryCtor(BoxParser.SAMPLE_ENTRY_TYPE_AUDIO, 	"mp4a");
 BoxParser.createSampleEntryCtor(BoxParser.SAMPLE_ENTRY_TYPE_AUDIO, 	"ac-3");
 BoxParser.createSampleEntryCtor(BoxParser.SAMPLE_ENTRY_TYPE_AUDIO, 	"ec-3");
@@ -2690,8 +2696,6 @@ BoxParser.createEncryptedSampleEntryCtor(BoxParser.SAMPLE_ENTRY_TYPE_SUBTITLE, 	
 BoxParser.createEncryptedSampleEntryCtor(BoxParser.SAMPLE_ENTRY_TYPE_SYSTEM, 	"encs");
 BoxParser.createEncryptedSampleEntryCtor(BoxParser.SAMPLE_ENTRY_TYPE_TEXT, 		"enct");
 BoxParser.createEncryptedSampleEntryCtor(BoxParser.SAMPLE_ENTRY_TYPE_METADATA, 	"encm");
-
-
 // file:src/parsing/a1lx.js
 BoxParser.createBoxCtor("a1lx", function(stream) {
 	var large_size = stream.readUint8() & 1;
@@ -4744,6 +4748,141 @@ BoxParser.createBoxCtor("vttC", function(stream) {
 	this.text = stream.readString(this.size - this.hdr_size);
 });
 
+// file:src/parsing/vvcC.js
+BoxParser.createFullBoxCtor("vvcC", function (stream) {
+  var i, j;
+
+  // helper object to simplify extracting individual bits
+  var bitReader = {
+    held_bits: undefined,
+    num_held_bits: 0,
+
+    stream_read_1_bytes: function (strm) {
+      this.held_bits = strm.readUint8();
+      this.num_held_bits = 1 * 8;
+    },
+    stream_read_2_bytes: function (strm) {
+      this.held_bits = strm.readUint16();
+      this.num_held_bits = 2 * 8;
+    },
+
+    extract_bits: function (num_bits) {
+      var ret = (this.held_bits >> (this.num_held_bits - num_bits)) & ((1 << num_bits) - 1);
+      this.num_held_bits -= num_bits;
+      return ret;
+    }
+  };
+
+  // VvcDecoderConfigurationRecord
+  bitReader.stream_read_1_bytes(stream);
+  bitReader.extract_bits(5);  // reserved
+  this.lengthSizeMinusOne = bitReader.extract_bits(2);
+  this.ptl_present_flag = bitReader.extract_bits(1);
+
+  if (this.ptl_present_flag) {
+    bitReader.stream_read_2_bytes(stream);
+    this.ols_idx = bitReader.extract_bits(9);
+    this.num_sublayers = bitReader.extract_bits(3);
+    this.constant_frame_rate = bitReader.extract_bits(2);
+    this.chroma_format_idc = bitReader.extract_bits(2);
+
+    bitReader.stream_read_1_bytes(stream);
+    this.bit_depth_minus8 = bitReader.extract_bits(3);
+    bitReader.extract_bits(5);  // reserved
+
+    // VvcPTLRecord
+    {
+      bitReader.stream_read_2_bytes(stream);
+      bitReader.extract_bits(2);  // reserved
+      this.num_bytes_constraint_info = bitReader.extract_bits(6);
+      this.general_profile_idc = bitReader.extract_bits(7);
+      this.general_tier_flag = bitReader.extract_bits(1);
+
+      this.general_level_idc = stream.readUint8();
+
+      bitReader.stream_read_1_bytes(stream);
+      this.ptl_frame_only_constraint_flag = bitReader.extract_bits(1);
+      this.ptl_multilayer_enabled_flag = bitReader.extract_bits(1);
+
+      this.general_constraint_info = new Uint8Array(this.num_bytes_constraint_info);
+      if (this.num_bytes_constraint_info) {
+        for (i = 0; i < this.num_bytes_constraint_info - 1; i++) {
+          var cnstr1 = bitReader.extract_bits(6);
+          bitReader.stream_read_1_bytes(stream);
+          var cnstr2 = bitReader.extract_bits(2);
+
+          this.general_constraint_info[i] = ((cnstr1 << 2) | cnstr2);
+        }
+        this.general_constraint_info[this.num_bytes_constraint_info - 1] = bitReader.extract_bits(6);
+      } else {
+        //forbidden in spec!
+        bitReader.extract_bits(6);
+      }
+
+      bitReader.stream_read_1_bytes(stream);
+      this.ptl_sublayer_present_mask = 0;
+      for (j = this.num_sublayers - 2; j >= 0; --j) {
+        var val = bitReader.extract_bits(1);
+        this.ptl_sublayer_present_mask |= val << j;
+      }
+      for (j = this.num_sublayers; j <= 8 && this.num_sublayers > 1; ++j) {
+        bitReader.extract_bits(1);  // ptl_reserved_zero_bit
+      }
+
+      for (j = this.num_sublayers - 2; j >= 0; --j) {
+        if (this.ptl_sublayer_present_mask & (1 << j)) {
+          this.sublayer_level_idc[j] = stream.readUint8();
+        }
+      }
+
+      this.ptl_num_sub_profiles = stream.readUint8();
+      this.general_sub_profile_idc = [];
+      if (this.ptl_num_sub_profiles) {
+        for (i = 0; i < this.ptl_num_sub_profiles; i++) {
+          this.general_sub_profile_idc.push(stream.readUint32());
+        }
+      }
+    }  // end VvcPTLRecord
+
+    this.max_picture_width = stream.readUint16();
+    this.max_picture_height = stream.readUint16();
+    this.avg_frame_rate = stream.readUint16();
+  }
+
+  var VVC_NALU_OPI = 12;
+  var VVC_NALU_DEC_PARAM = 13;
+
+  this.nalu_arrays = [];
+  var num_of_arrays = stream.readUint8();
+  for (i = 0; i < num_of_arrays; i++) {
+    var nalu_array = [];
+    this.nalu_arrays.push(nalu_array);
+
+    bitReader.stream_read_1_bytes(stream);
+    nalu_array.completeness = bitReader.extract_bits(1);
+    bitReader.extract_bits(2);  // reserved
+    nalu_array.nalu_type = bitReader.extract_bits(5);
+
+    var numNalus = 1;
+    if (nalu_array.nalu_type != VVC_NALU_DEC_PARAM && nalu_array.nalu_type != VVC_NALU_OPI) {
+      numNalus = stream.readUint16();
+    }
+
+    for (j = 0; j < numNalus; j++) {
+      var len = stream.readUint16();
+      nalu_array.push({
+        data: stream.readUint8Array(len),
+        length: len
+      });
+    }
+  }
+});
+// file:src/parsing/vvnC.js
+BoxParser.createFullBoxCtor("vvnC", function (stream) {
+  // VvcNALUConfigBox
+  var tmp = strm.readUint8();
+  this.lengthSizeMinusOne = (tmp & 0x3);
+});
 // file:src/box-codecs.js
 BoxParser.SampleEntry.prototype.isVideo = function() {
 	return false;
@@ -4900,6 +5039,67 @@ BoxParser.hvc1SampleEntry.prototype.getCodec = function() {
 	return baseCodec;
 }
 
+BoxParser.vvc1SampleEntry.prototype.getCodec =
+BoxParser.vvi1SampleEntry.prototype.getCodec = function () {
+	var i;
+	var baseCodec = BoxParser.SampleEntry.prototype.getCodec.call(this);
+	if (this.vvcC) {
+		baseCodec += '.' + this.vvcC.general_profile_idc;
+		if (this.vvcC.general_tier_flag) {
+			baseCodec += '.H';
+		} else {
+			baseCodec += '.L';
+		}
+		baseCodec += this.vvcC.general_level_idc;
+
+		var constraint_string = "";
+		if (this.vvcC.general_constraint_info) {
+			var bytes = [];
+			var byte = 0;
+			byte |= this.vvcC.ptl_frame_only_constraint << 7;
+			byte |= this.vvcC.ptl_multilayer_enabled << 6;
+			var last_nonzero;
+			for (i = 0; i < this.vvcC.general_constraint_info.length; ++i) {
+				byte |= (this.vvcC.general_constraint_info[i] >> 2) & 0x3f;
+				bytes.push(byte);
+				if (byte) {
+					last_nonzero = i;
+				}
+
+				byte = (this.vvcC.general_constraint_info[i] >> 2) & 0x03;
+			}
+
+			if (last_nonzero === undefined) {
+				constraint_string = ".CA";
+			}
+			else {
+				constraint_string = ".C"
+				var base32_chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+				var held_bits = 0;
+				var num_held_bits = 0;
+				for (i = 0; i <= last_nonzero; ++i) {
+					held_bits = (held_bits << 8) | bytes[i];
+					num_held_bits += 8;
+
+					while (num_held_bits >= 5) {
+						var val = (held_bits >> (num_held_bits - 5)) & 0x1f;
+						constraint_string += base32_chars[val];
+
+						num_held_bits -= 5;
+						held_bits &= (1 << num_held_bits) - 1;
+					}
+				}
+				if (num_held_bits) {
+					held_bits <<= (5 - num_held_bits);  // right-pad with zeros to 5 bits (is this correct?)
+					constraint_string += base32_chars[held_bits & 0x1f];
+				}
+			}
+		}
+		baseCodec += constraint_string;
+	}
+	return baseCodec;
+}
+
 BoxParser.mp4aSampleEntry.prototype.getCodec = function() {
 	var baseCodec = BoxParser.SampleEntry.prototype.getCodec.call(this);
 	if (this.esds && this.esds.esd) {
@@ -4920,8 +5120,26 @@ BoxParser.stxtSampleEntry.prototype.getCodec = function() {
 	}
 }
 
+BoxParser.vp08SampleEntry.prototype.getCodec =
+BoxParser.vp09SampleEntry.prototype.getCodec = function() {
+	var baseCodec = BoxParser.SampleEntry.prototype.getCodec.call(this);
+	var level = this.vpcC.level;
+	if (level == 0) {
+		level = "00";
+	}
+	var bitDepth = this.vpcC.bitDepth;
+	if (bitDepth == 8) {
+		bitDepth = "08";
+	}
+	return baseCodec + ".0" + this.vpcC.profile + "." + level + "." + bitDepth;
+}
+
 BoxParser.av01SampleEntry.prototype.getCodec = function() {
 	var baseCodec = BoxParser.SampleEntry.prototype.getCodec.call(this);
+	var level = this.av1C.seq_level_idx_0;
+	if (level < 10) {
+		level = "0" + level;
+	}
 	var bitdepth;
 	if (this.av1C.seq_profile === 2 && this.av1C.high_bitdepth === 1) {
 		bitdepth = (this.av1C.twelve_bit === 1) ? "12" : "10";
@@ -4929,10 +5147,8 @@ BoxParser.av01SampleEntry.prototype.getCodec = function() {
 		bitdepth = (this.av1C.high_bitdepth === 1) ? "10" : "08";
 	}
 	// TODO need to parse the SH to find color config
-	return baseCodec+"."+this.av1C.seq_profile+"."+this.av1C.seq_level_idx_0+(this.av1C.seq_tier_0?"H":"M")+"."+bitdepth;//+"."+this.av1C.monochrome+"."+this.av1C.chroma_subsampling_x+""+this.av1C.chroma_subsampling_y+""+this.av1C.chroma_sample_position;
+	return baseCodec+"."+this.av1C.seq_profile+"."+level+(this.av1C.seq_tier_0?"H":"M")+"."+bitdepth;//+"."+this.av1C.monochrome+"."+this.av1C.chroma_subsampling_x+""+this.av1C.chroma_subsampling_y+""+this.av1C.chroma_sample_position;
 }
-
-
 // file:src/box-write.js
 /* 
  * Copyright (c) Telecom ParisTech/TSI/MM/GPAC Cyril Concolato
@@ -6707,12 +6923,12 @@ ISOFile.prototype.init = function (_options) {
 							   .set("compatible_brands", options.brands || ["iso4"]);
 	var moov = this.add("moov");
 	moov.add("mvhd").set("timescale", options.timescale || 600)
-					.set("rate", options.rate || 1)
+					.set("rate", options.rate || 1<<16)
 					.set("creation_time", 0)
 					.set("modification_time", 0)
 					.set("duration", options.duration || 0)
-					.set("volume", 1)
-					.set("matrix", [ 0, 0, 0, 0, 0, 0, 0, 0, 0])
+					.set("volume", (options.width) ? 0 : 0x0100)
+					.set("matrix", [ 1<<16, 0, 0, 0, 1<<16, 0, 0, 0, 0x40000000])
 					.set("next_track_id", 1);
 	moov.add("mvex");
 	return this;
@@ -6750,7 +6966,7 @@ ISOFile.prototype.addTrack = function (_options) {
 					.set("modification_time", 0)
 					.set("timescale", options.timescale || 1)
 					.set("duration", options.media_duration || 0)
-					.set("language", options.language || 0);
+					.set("language", options.language || "und");
 
 	mdia.add("hdlr").set("handler", options.hdlr || "vide")
 					.set("name", options.name || "Track created with MP4Box.js");
@@ -6781,13 +6997,12 @@ ISOFile.prototype.addTrack = function (_options) {
 						.set("frame_count", 1)
 						.set("compressorname", options.type+" Compressor")
 						.set("depth", 0x18);
-		// sample_description_entry.add("avcC").set("SPS", [])
-		// 						.set("PPS", [])
-		// 						.set("configurationVersion", 1)
-		// 						.set("AVCProfileIndication",0)
-		// 						.set("profile_compatibility", 0)
-		// 						.set("AVCLevelIndication" ,0)
-		// 						.set("lengthSizeMinusOne", 0);
+			if (options.avcDecoderConfigRecord) {
+				var avcC = new BoxParser.avcCBox();
+				var stream = new MP4BoxStream(options.avcDecoderConfigRecord);
+				avcC.parse(stream);
+				sample_description_entry.addBox(avcC);
+			}
 			break;
 		case "Audio":
 			minf.add("smhd").set("balance", options.balance || 0);
@@ -6863,7 +7078,7 @@ ISOFile.prototype.addSample = function (track_id, data, _options) {
 	sample.description_index = (options.sample_description_index ? options.sample_description_index - 1: 0);
 	sample.description = trak.mdia.minf.stbl.stsd.entries[sample.description_index];
 	sample.data = data;
-	sample.size = data.length;
+	sample.size = data.byteLength;
 	sample.alreadyRead = sample.size;
 	sample.duration = options.duration || 1;
 	sample.cts = options.cts || 0;
@@ -6879,6 +7094,9 @@ ISOFile.prototype.addSample = function (track_id, data, _options) {
 	trak.samples.push(sample);
 	trak.samples_size += sample.size;
 	trak.samples_duration += sample.duration;
+	if (!trak.first_dts) {
+		trak.first_dts = options.dts;
+	}
 
 	this.processSamples();
 	
@@ -6887,7 +7105,7 @@ ISOFile.prototype.addSample = function (track_id, data, _options) {
 	moof.computeSize();
 	/* adjusting the data_offset now that the moof size is known*/
 	moof.trafs[0].truns[0].data_offset = moof.size+8; //8 is mdat header
-	this.add("mdat").data = data;
+	this.add("mdat").data = new Uint8Array(data);
 	return sample;
 }
 
@@ -6902,9 +7120,10 @@ ISOFile.prototype.createSingleSampleMoof = function(sample) {
 	moof.add("mfhd").set("sequence_number", this.nextMoofNumber);
 	this.nextMoofNumber++;
 	var traf = moof.add("traf");
+	var trak = this.getTrackById(sample.track_id);
 	traf.add("tfhd").set("track_id", sample.track_id)
 					.set("flags", BoxParser.TFHD_FLAG_DEFAULT_BASE_IS_MOOF);
-	traf.add("tfdt").set("baseMediaDecodeTime", sample.dts);
+	traf.add("tfdt").set("baseMediaDecodeTime", (sample.dts - (trak.first_dts || 0)));
 	traf.add("trun").set("flags", BoxParser.TRUN_FLAGS_DATA_OFFSET | BoxParser.TRUN_FLAGS_DURATION | 
 				 				  BoxParser.TRUN_FLAGS_SIZE | BoxParser.TRUN_FLAGS_FLAGS | 
 				 				  BoxParser.TRUN_FLAGS_CTS_OFFSET)
@@ -7619,7 +7838,7 @@ ISOFile.prototype.flattenItemInfo = function() {
 				}
 				for (j = 0; j < association.props.length; j++) {
 					var propEntry = association.props[j];
-					if (propEntry.property_index > 0) {
+					if (propEntry.property_index > 0 && propEntry.property_index-1 < meta.iprp.ipco.boxes.length) {
 						var propbox = meta.iprp.ipco.boxes[propEntry.property_index-1];
 						item.properties[propbox.type] = propbox;
 						item.properties.boxes.push(propbox);

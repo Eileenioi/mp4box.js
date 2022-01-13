@@ -153,6 +153,67 @@ BoxParser.hvc1SampleEntry.prototype.getCodec = function() {
 	return baseCodec;
 }
 
+BoxParser.vvc1SampleEntry.prototype.getCodec =
+BoxParser.vvi1SampleEntry.prototype.getCodec = function () {
+	var i;
+	var baseCodec = BoxParser.SampleEntry.prototype.getCodec.call(this);
+	if (this.vvcC) {
+		baseCodec += '.' + this.vvcC.general_profile_idc;
+		if (this.vvcC.general_tier_flag) {
+			baseCodec += '.H';
+		} else {
+			baseCodec += '.L';
+		}
+		baseCodec += this.vvcC.general_level_idc;
+
+		var constraint_string = "";
+		if (this.vvcC.general_constraint_info) {
+			var bytes = [];
+			var byte = 0;
+			byte |= this.vvcC.ptl_frame_only_constraint << 7;
+			byte |= this.vvcC.ptl_multilayer_enabled << 6;
+			var last_nonzero;
+			for (i = 0; i < this.vvcC.general_constraint_info.length; ++i) {
+				byte |= (this.vvcC.general_constraint_info[i] >> 2) & 0x3f;
+				bytes.push(byte);
+				if (byte) {
+					last_nonzero = i;
+				}
+
+				byte = (this.vvcC.general_constraint_info[i] >> 2) & 0x03;
+			}
+
+			if (last_nonzero === undefined) {
+				constraint_string = ".CA";
+			}
+			else {
+				constraint_string = ".C"
+				var base32_chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+				var held_bits = 0;
+				var num_held_bits = 0;
+				for (i = 0; i <= last_nonzero; ++i) {
+					held_bits = (held_bits << 8) | bytes[i];
+					num_held_bits += 8;
+
+					while (num_held_bits >= 5) {
+						var val = (held_bits >> (num_held_bits - 5)) & 0x1f;
+						constraint_string += base32_chars[val];
+
+						num_held_bits -= 5;
+						held_bits &= (1 << num_held_bits) - 1;
+					}
+				}
+				if (num_held_bits) {
+					held_bits <<= (5 - num_held_bits);  // right-pad with zeros to 5 bits (is this correct?)
+					constraint_string += base32_chars[held_bits & 0x1f];
+				}
+			}
+		}
+		baseCodec += constraint_string;
+	}
+	return baseCodec;
+}
+
 BoxParser.mp4aSampleEntry.prototype.getCodec = function() {
 	var baseCodec = BoxParser.SampleEntry.prototype.getCodec.call(this);
 	if (this.esds && this.esds.esd) {
@@ -173,8 +234,26 @@ BoxParser.stxtSampleEntry.prototype.getCodec = function() {
 	}
 }
 
+BoxParser.vp08SampleEntry.prototype.getCodec =
+BoxParser.vp09SampleEntry.prototype.getCodec = function() {
+	var baseCodec = BoxParser.SampleEntry.prototype.getCodec.call(this);
+	var level = this.vpcC.level;
+	if (level == 0) {
+		level = "00";
+	}
+	var bitDepth = this.vpcC.bitDepth;
+	if (bitDepth == 8) {
+		bitDepth = "08";
+	}
+	return baseCodec + ".0" + this.vpcC.profile + "." + level + "." + bitDepth;
+}
+
 BoxParser.av01SampleEntry.prototype.getCodec = function() {
 	var baseCodec = BoxParser.SampleEntry.prototype.getCodec.call(this);
+	var level = this.av1C.seq_level_idx_0;
+	if (level < 10) {
+		level = "0" + level;
+	}
 	var bitdepth;
 	if (this.av1C.seq_profile === 2 && this.av1C.high_bitdepth === 1) {
 		bitdepth = (this.av1C.twelve_bit === 1) ? "12" : "10";
@@ -182,7 +261,5 @@ BoxParser.av01SampleEntry.prototype.getCodec = function() {
 		bitdepth = (this.av1C.high_bitdepth === 1) ? "10" : "08";
 	}
 	// TODO need to parse the SH to find color config
-	return baseCodec+"."+this.av1C.seq_profile+"."+this.av1C.seq_level_idx_0+(this.av1C.seq_tier_0?"H":"M")+"."+bitdepth;//+"."+this.av1C.monochrome+"."+this.av1C.chroma_subsampling_x+""+this.av1C.chroma_subsampling_y+""+this.av1C.chroma_sample_position;
+	return baseCodec+"."+this.av1C.seq_profile+"."+level+(this.av1C.seq_tier_0?"H":"M")+"."+bitdepth;//+"."+this.av1C.monochrome+"."+this.av1C.chroma_subsampling_x+""+this.av1C.chroma_subsampling_y+""+this.av1C.chroma_sample_position;
 }
-
-
